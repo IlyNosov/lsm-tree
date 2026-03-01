@@ -3,88 +3,111 @@ package main
 import (
 	"fmt"
 	"log"
+	"math/rand"
 	"os"
+	"time"
 
+	"lsm_tree/index"
 	"lsm_tree/lsm"
 )
 
-func printFiles(dir string) {
-	fmt.Println("SSTable files:")
-	files, _ := os.ReadDir(dir)
-	for _, f := range files {
-		fmt.Println("  ", f.Name())
-	}
-	fmt.Println()
-}
+const (
+	DocsCount = 1000 // Тестировал и на 100к с частыми flush, все норм
+	VocabSize = 50
+)
 
 func main() {
-	dataDir := "./data"
-	_ = os.RemoveAll(dataDir)
+	rand.Seed(time.Now().UnixNano())
 
-	opts := lsm.DefaultOptions(dataDir)
+	dir := "stress_data"
+	_ = os.RemoveAll(dir)
 
-	// маленький размер, чтобы чаще был flush
-	opts.MemTableSize = 3
-	opts.BlockEntries = 2
+	opts := lsm.DefaultOptions(dir)
+	opts.MemTableSize = 5
 	opts.MaxL0 = 3
+	opts.CompactionMode = lsm.CompactionBitmapOR
 
 	db, err := lsm.NewLSM(opts)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer db.Close()
 
-	fmt.Println("=== PHASE 1: initial inserts ===")
+	idx := index.NewIndexer(db)
 
-	db.Put("a", []byte("1"))
-	db.Put("b", []byte("2"))
-	db.Put("c", []byte("3")) // flush 1
+	// создаем словарь
+	vocab := make([]string, VocabSize)
+	for i := 0; i < VocabSize; i++ {
+		vocab[i] = fmt.Sprintf("term%d", i)
+	}
 
-	db.Put("d", []byte("4"))
-	db.Put("e", []byte("5"))
-	db.Put("f", []byte("6")) // flush 2
+	// ground truth
+	expected := make(map[string]map[uint32]bool)
 
-	db.Put("g", []byte("7"))
-	db.Put("h", []byte("8"))
-	db.Put("i", []byte("9")) // flush 3
+	fmt.Println("Indexing documents...")
 
-	printFiles(dataDir)
+	for docID := uint32(1); docID <= DocsCount; docID++ {
+		termsPerDoc := rand.Intn(5) + 1
 
-	fmt.Println("=== PHASE 2: overwrite some keys ===")
+		text := ""
+		seen := make(map[string]bool)
 
-	db.Put("a", []byte("100"))
-	db.Put("b", []byte("200"))
-	db.Put("c", []byte("300")) // flush 4
+		for i := 0; i < termsPerDoc; i++ {
+			term := vocab[rand.Intn(VocabSize)]
+			text += term + " "
 
-	printFiles(dataDir)
-
-	fmt.Println("=== PHASE 3: deletes ===")
-
-	db.Delete("d")
-	db.Delete("e")
-	db.Delete("f") // flush 5
-
-	printFiles(dataDir)
-
-	fmt.Println("=== PHASE 4: reads ===")
-
-	keys := []string{"a", "b", "c", "d", "e", "f", "g"}
-
-	for _, k := range keys {
-		v, ok, err := db.Get(k)
-		if err != nil {
-			log.Fatal(err)
+			if !seen[term] {
+				if expected[term] == nil {
+					expected[term] = make(map[uint32]bool)
+				}
+				expected[term][docID] = true
+				seen[term] = true
+			}
 		}
-		if ok {
-			fmt.Printf("%s = %s\n", k, string(v))
-		} else {
-			fmt.Printf("%s = <deleted or not found>\n", k)
+
+		if err := idx.IndexDocument(docID, text); err != nil {
+			log.Fatal(err)
 		}
 	}
 
-	fmt.Println()
-	fmt.Println("=== FINAL FILES ===")
-	printFiles(dataDir)
+	fmt.Println("Initial verification...")
 
-	fmt.Println("Demo complete.")
+	verifyIndex(idx, expected)
+
+	fmt.Println("Closing DB...")
+	db.Close()
+
+	fmt.Println("Reopening DB...")
+
+	db2, err := lsm.NewLSM(opts)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db2.Close()
+
+	idx2 := index.NewIndexer(db2)
+
+	fmt.Println("Verification after restart...")
+	verifyIndex(idx2, expected)
+
+	fmt.Println("ALL CHECKS PASSED ✔")
+}
+
+func verifyIndex(idx *index.Indexer, expected map[string]map[uint32]bool) {
+	for term, truth := range expected {
+		results, err := idx.Search(term)
+		if err != nil {
+			log.Fatalf("search error for %s: %v", term, err)
+		}
+
+		if len(results) != len(truth) {
+			log.Fatalf("term %s mismatch count: got=%d expected=%d",
+				term, len(results), len(truth))
+		}
+
+		for _, id := range results {
+			if !truth[id] {
+				log.Fatalf("term %s lost docID %d", term, id)
+			}
+		}
+	}
 }

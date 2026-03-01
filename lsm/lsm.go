@@ -9,6 +9,8 @@ import (
 	"lsm_tree/lsm/compaction"
 	"lsm_tree/lsm/sstable"
 	"lsm_tree/record"
+
+	"github.com/RoaringBitmap/roaring"
 )
 
 type LSM struct {
@@ -83,28 +85,86 @@ func (it *memIterator) Next() (bool, error) {
 }
 
 func NewLSM(opts Options) (*LSM, error) {
-	if err := os.MkdirAll(opts.Dir, 0755); err != nil {
+	l := &LSM{
+		opts: opts,
+		mem:  NewMemTable(),
+		l0:   []*sstable.SSTable{},
+	}
+
+	// создать директорию
+	if err := os.MkdirAll(opts.Dir, 0o755); err != nil {
 		return nil, err
 	}
 
-	return &LSM{
-		opts:       opts,
-		mem:        NewMemTable(),
-		l0:         make([]*sstable.SSTable, 0),
-		nextFileID: 1,
-	}, nil
+	// восстанавливаем состояние из существующих SSTable
+	files, err := os.ReadDir(opts.Dir)
+	if err != nil {
+		return nil, err
+	}
+
+	var maxID int
+	for _, f := range files {
+		if filepath.Ext(f.Name()) != ".sst" {
+			continue
+		}
+
+		path := filepath.Join(opts.Dir, f.Name())
+
+		tbl, err := sstable.Open(path)
+		if err != nil {
+			return nil, err
+		}
+
+		l.l0 = append(l.l0, tbl)
+
+		var id int
+		fmt.Sscanf(f.Name(), "l0-%06d.sst", &id)
+		if id > maxID {
+			maxID = id
+		}
+	}
+
+	l.nextFileID = uint64(maxID + 1)
+
+	return l, nil
 }
 
 // Put описывает значение по ключу
 func (l *LSM) Put(key string, value []byte) error {
 	l.seq++
-	l.mem.Put(key, value, l.seq)
 
-	// Триггер flush по количеству записей в memtable
+	// объединяем дельты в memtable в индексном
+	if l.opts.CompactionMode == CompactionBitmapOR {
+		if e, ok := l.mem.Get(key); ok && !e.Tombstone && len(e.Value) > 0 {
+			merged, err := orBitmapBytes(e.Value, value)
+			if err != nil {
+				return err
+			}
+			l.mem.Put(key, merged, l.seq)
+		} else {
+			l.mem.Put(key, value, l.seq)
+		}
+	} else {
+		l.mem.Put(key, value, l.seq)
+	}
+
 	if l.mem.Len() >= l.opts.MemTableSize {
 		return l.flush()
 	}
 	return nil
+}
+
+func orBitmapBytes(a, b []byte) ([]byte, error) {
+	bmA := roaring.New()
+	if err := bmA.UnmarshalBinary(a); err != nil {
+		return nil, err
+	}
+	bmB := roaring.New()
+	if err := bmB.UnmarshalBinary(b); err != nil {
+		return nil, err
+	}
+	bmA.Or(bmB)
+	return bmA.MarshalBinary()
 }
 
 // Delete tombstone удаление
@@ -146,17 +206,19 @@ func (l *LSM) Get(key string) ([]byte, bool, error) {
 
 // Close закрывает все открытые SSTable файлы
 func (l *LSM) Close() error {
-	var firstErr error
-	for _, t := range l.l0 {
-		if err := t.Close(); err != nil && firstErr == nil {
-			firstErr = err
+	if l.mem.Len() > 0 {
+		if err := l.flush(); err != nil {
+			return err
 		}
 	}
-	l.l0 = nil
-	return firstErr
+
+	for _, t := range l.l0 {
+		_ = t.Close()
+	}
+	return nil
 }
 
-// flush сбрасывает memtable в новый SSTable файл (L0)
+// flush сбрасывает memtable в новый SSTable файл
 func (l *LSM) flush() error {
 	entries := l.mem.SortedEntries()
 	if len(entries) == 0 {
@@ -216,9 +278,16 @@ func (l *LSM) compact() error {
 		return err
 	}
 
-	// streaming merge
-	if err := compaction.MergeToBuilder(l.l0, b); err != nil {
-		return err
+	// выбор merge
+	switch l.opts.CompactionMode {
+	case CompactionBitmapOR:
+		if err := compaction.MergeToBuilderBitmapOR(l.l0, b); err != nil {
+			return err
+		}
+	default:
+		if err := compaction.MergeToBuilder(l.l0, b); err != nil {
+			return err
+		}
 	}
 	if err := b.Finish(); err != nil {
 		return err
@@ -332,4 +401,22 @@ func (l *LSM) Range(start, end string) (map[string][]byte, error) {
 	}
 
 	return result, nil
+}
+
+func (l *LSM) GetAllValues(key string) ([][]byte, error) {
+	out := make([][]byte, 0, 1+len(l.l0))
+
+	if e, ok := l.mem.Get(key); ok && !e.Tombstone && len(e.Value) > 0 {
+		out = append(out, e.Value)
+	}
+	for i := len(l.l0) - 1; i >= 0; i-- {
+		e, found, err := l.l0[i].Get(key)
+		if err != nil {
+			return nil, err
+		}
+		if found && !e.Tombstone && len(e.Value) > 0 {
+			out = append(out, e.Value)
+		}
+	}
+	return out, nil
 }
