@@ -89,7 +89,79 @@ func main() {
 	fmt.Println("Verification after restart...")
 	verifyIndex(idx2, expected)
 
-	fmt.Println("ALL CHECKS PASSED ✔")
+	fmt.Println("ALL CHECKS PASSED")
+
+	// префикс и wildcard
+	demoPrefixAndWildcard()
+}
+
+func demoPrefixAndWildcard() {
+	fmt.Println("\nPrefix & Wildcard Demo")
+
+	dir := "demo3_data"
+	_ = os.RemoveAll(dir)
+	defer os.RemoveAll(dir)
+
+	opts := lsm.DefaultOptions(dir)
+	opts.MemTableSize = 5
+	opts.MaxL0 = 3
+	opts.CompactionMode = lsm.CompactionBitmapOR
+
+	db, err := lsm.NewLSM(opts)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
+
+	idx := index.NewIndexer(db)
+
+	// индексируем документы с реальными словами
+	docs := map[uint32]string{
+		1: "running through the forest quickly",
+		2: "the runner finished first in the race",
+		3: "we run every single morning",
+		4: "sleeping under the stars peacefully",
+		5: "reading interesting books all day",
+		6: "reloading the application after restart",
+		7: "programming requires patience and fun",
+	}
+
+	for id, text := range docs {
+		if err := idx.IndexDocument(id, text); err != nil {
+			log.Fatal(err)
+		}
+	}
+
+	fmt.Println("\nДокументы:")
+	for id := uint32(1); id <= 7; id++ {
+		fmt.Printf("  doc %d: %q\n", id, docs[id])
+	}
+
+	// префиксный поиск
+	fmt.Println("\n--- Prefix Search ---")
+
+	prefixTests := []string{"run", "read", "sleep", "prog"}
+	for _, p := range prefixTests {
+		results, err := idx.SearchPrefix(p)
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Printf("  prefix(%q) -> docs %v\n", p, results)
+	}
+
+	// wildcard поиск
+	fmt.Println("\n--- Wildcard Search (k-gram) ---")
+
+	wildcardTests := []string{"run*", "r?n", "*ing", "re*d", "f*n", "?un"}
+	for _, w := range wildcardTests {
+		results, err := idx.SearchWildcard(w)
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Printf("  wildcard(%q) -> docs %v\n", w, results)
+	}
+
+	fmt.Println("\nPrefix & Wildcard demo DONE")
 }
 
 func verifyIndex(idx *index.Indexer, expected map[string]map[uint32]bool) {

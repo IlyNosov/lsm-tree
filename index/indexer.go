@@ -10,13 +10,15 @@ type Indexer struct {
 	lsm        *lsm.LSM
 	allDocsKey string
 	lang       string
+	kgrams     map[string]map[string]bool // k-gram -> множество термов (для wildcard поиска)
 }
 
 func NewIndexer(lsm *lsm.LSM) *Indexer {
 	return &Indexer{
 		lsm:        lsm,
 		allDocsKey: "__all_docs__",
-		lang:       "en", // по умолчанию английский
+		lang:       "en",
+		kgrams:     make(map[string]map[string]bool),
 	}
 }
 
@@ -24,7 +26,8 @@ func NewIndexerWithLang(lsm *lsm.LSM, lang string) *Indexer {
 	return &Indexer{
 		lsm:        lsm,
 		allDocsKey: "__all_docs__",
-		lang:       lang, // язык для индексации
+		lang:       lang,
+		kgrams:     make(map[string]map[string]bool),
 	}
 }
 
@@ -55,6 +58,9 @@ func (idx *Indexer) IndexDocument(docID uint32, text string) error {
 		if err := idx.lsm.Put(norm, deltaBytes); err != nil {
 			return err
 		}
+
+		// пополняем k-gram индекс для wildcard поиска
+		idx.addToKgrams(norm)
 	}
 	return idx.updateAllDocs(docID, true)
 }
@@ -103,4 +109,16 @@ func (idx *Indexer) getBitmap(key string) (*roaring.Bitmap, error) {
 // getAllDocs возвращает битмап всех проиндексированных документов
 func (idx *Indexer) getAllDocs() (*roaring.Bitmap, error) {
 	return idx.getBitmap(idx.allDocsKey)
+}
+
+// addToKgrams разбивает терм на триграммы и добавляет в k-gram индекс
+// терм оборачивается маркерами $ (начало) и $ (конец)
+// например "run" -> "$ru", "run", "un$"
+func (idx *Indexer) addToKgrams(term string) {
+	for _, kg := range extractKgrams(term, 3) {
+		if idx.kgrams[kg] == nil {
+			idx.kgrams[kg] = make(map[string]bool)
+		}
+		idx.kgrams[kg][term] = true
+	}
 }
