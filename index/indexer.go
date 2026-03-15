@@ -29,8 +29,8 @@ func NewIndexerWithLang(lsm *lsm.LSM, lang string) *Indexer {
 }
 
 // IndexDocument добавляет документ в индекс
+// Язык для стемминга берётся из idx.lang, чтобы индексация и поиск были согласованы
 func (idx *Indexer) IndexDocument(docID uint32, text string) error {
-	lang := detectLanguage(text)
 	words := tokenize(text)
 	uniqueWords := make(map[string]bool)
 
@@ -43,7 +43,7 @@ func (idx *Indexer) IndexDocument(docID uint32, text string) error {
 	}
 
 	for _, w := range words {
-		norm, ok := normalizeWord(w, lang)
+		norm, ok := normalizeWord(w, idx.lang)
 		if !ok {
 			continue
 		}

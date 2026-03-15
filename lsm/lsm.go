@@ -332,21 +332,17 @@ func (l *LSM) Range(start, end string) (map[string][]byte, error) {
 		})
 	}
 
-	// SSTables
+	// SSTables — используем Seek для логарифмического позиционирования
 	for i, t := range l.l0 {
 		it, err := t.NewIterator()
 		if err != nil {
 			return nil, err
 		}
 
-		for it.Valid() && it.Entry().Key < start {
-			ok, err := it.Next()
-			if err != nil {
-				return nil, err
-			}
-			if !ok {
-				break
-			}
+		// Seek использует бинарный поиск по индексу блоков,
+		// а не линейное сканирование всех записей
+		if err := it.Seek(start); err != nil {
+			return nil, err
 		}
 
 		if it.Valid() {
