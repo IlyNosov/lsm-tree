@@ -16,6 +16,7 @@ const (
 	tokenNot
 	tokenLParen
 	tokenRParen
+	tokenDateRange // DATE(from,to)
 )
 
 type token struct {
@@ -25,25 +26,58 @@ type token struct {
 
 // tokenizeQuery разбивает строку запроса на токены
 func tokenizeQuery(q string) []token {
-	q = strings.ReplaceAll(q, "(", " ( ")
-	q = strings.ReplaceAll(q, ")", " ) ")
-	parts := strings.Fields(q)
 	var tokens []token
-	for _, p := range parts {
-		switch strings.ToUpper(p) {
+	i := 0
+
+	for i < len(q) {
+		// пропускаем пробелы
+		if q[i] == ' ' || q[i] == '\t' {
+			i++
+			continue
+		}
+
+		// проверяем DATE(...)
+		if i+5 <= len(q) && strings.ToUpper(q[i:i+5]) == "DATE(" {
+			// ищем закрывающую скобку
+			end := strings.Index(q[i:], ")")
+			if end != -1 {
+				// содержимое между DATE( и )
+				inner := q[i+5 : i+end]
+				tokens = append(tokens, token{typ: tokenDateRange, val: inner})
+				i = i + end + 1
+				continue
+			}
+		}
+
+		// скобки
+		if q[i] == '(' {
+			tokens = append(tokens, token{typ: tokenLParen})
+			i++
+			continue
+		}
+		if q[i] == ')' {
+			tokens = append(tokens, token{typ: tokenRParen})
+			i++
+			continue
+		}
+
+		// читаем слово до пробела или скобки
+		j := i
+		for j < len(q) && q[j] != ' ' && q[j] != '\t' && q[j] != '(' && q[j] != ')' {
+			j++
+		}
+		word := q[i:j]
+		i = j
+
+		switch strings.ToUpper(word) {
 		case "AND":
 			tokens = append(tokens, token{typ: tokenAnd})
 		case "OR":
 			tokens = append(tokens, token{typ: tokenOr})
 		case "NOT":
 			tokens = append(tokens, token{typ: tokenNot})
-		case "(":
-			tokens = append(tokens, token{typ: tokenLParen})
-		case ")":
-			tokens = append(tokens, token{typ: tokenRParen})
 		default:
-			// Сохраняем сырое слово, нормализация будет позже с учетом языка
-			tokens = append(tokens, token{typ: tokenIdent, val: p})
+			tokens = append(tokens, token{typ: tokenIdent, val: word})
 		}
 	}
 	return tokens
@@ -70,7 +104,7 @@ func infixToRPN(tokens []token) ([]token, error) {
 
 	for _, tok := range tokens {
 		switch tok.typ {
-		case tokenIdent:
+		case tokenIdent, tokenDateRange:
 			output = append(output, tok)
 		case tokenAnd, tokenOr, tokenNot:
 			// пока стек не пуст и верхушка стека оператор с приоритетом >= текущего
@@ -119,7 +153,8 @@ func infixToRPN(tokens []token) ([]token, error) {
 }
 
 // Search выполняет поиск по булевому запросу с учетом языка
-// Поддерживаются операторы AND, OR, NOT и круглые скобки
+// Поддерживаются операторы AND, OR, NOT, круглые скобки
+// и DATE(YYYY-MM-DD,YYYY-MM-DD) для поиска по диапазону дат
 func (idx *Indexer) Search(query string) ([]uint32, error) {
 	// Токенизируем запрос
 	rawTokens := tokenizeQuery(query)
@@ -159,13 +194,25 @@ func (idx *Indexer) Search(query string) ([]uint32, error) {
 				return nil, err
 			}
 			stack = append(stack, bm)
+
+		case tokenDateRange:
+			// парсим "YYYY-MM-DD,YYYY-MM-DD" и получаем битмап документов в диапазоне
+			from, to, err := parseDateRange(tok.val)
+			if err != nil {
+				return nil, fmt.Errorf("invalid DATE range: %w", err)
+			}
+			bm, err := idx.GetDateBitmap(from, to)
+			if err != nil {
+				return nil, err
+			}
+			stack = append(stack, bm)
+
 		case tokenNot:
 			if len(stack) < 1 {
 				return nil, fmt.Errorf("NOT requires one operand")
 			}
 			operand := stack[len(stack)-1]
 			stack = stack[:len(stack)-1]
-			// NOT x = allDocs AND NOT x
 			result := roaring.AndNot(allDocs, operand)
 			stack = append(stack, result)
 		case tokenAnd:
