@@ -92,3 +92,13 @@ func detectLanguage(text string) string {
 	}
 	return "en"
 }
+
+// toLowerClean приводит строку к нижнему регистру и убирает лишние символы
+// без стемминга - используется для префиксного поиска
+func toLowerClean(s string) string {
+	s = strings.ToLower(s)
+	s = strings.TrimFunc(s, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsNumber(r)
+	})
+	return s
+}
